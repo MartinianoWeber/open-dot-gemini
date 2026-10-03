@@ -2,15 +2,15 @@ import "server-only";
 import type {
   ResponseComputerToolCall, ResponseFunctionToolCall, ResponseInputContent, ResponseInputItem, Response, Tool,
 } from "openai/resources/responses/responses";
+import { endAgyForDot, endAgySession, isAgyModel, runAgyTurn } from "./agy";
 import { clientFor, isReasoningModel, modelFor, supportsComputerTool } from "./client";
 import { systemPrompt, type Trigger } from "./prompt";
-import { COMPUTER_ENABLED, findTool, setConsult, toolsForDot, type ToolCtx } from "./tools";
-import { review } from "./review";
+import { expireDotWaits, hasWaiter, outputAfterCard, performTool, prepareToolCall, setCardResolver, settleWaiter } from "./gate";
+import { COMPUTER_ENABLED, setConsult, toolsForDot } from "./tools";
 import * as repo from "../repo";
 import * as computer from "../computer";
 import type { ComputerAction } from "../computer/browser";
 import { emit } from "../bus";
-import * as composio from "../composio";
 import type { AppTrigger, Attachment, CardData, Dot, Routine } from "@/lib/types";
 import * as files from "../files";
 
@@ -39,14 +39,16 @@ const state = (dotId: string): RunState => {
 
 // ---------------------------------------------------------------- public API
 
-export function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string) {
+export function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string, from?: string | null) {
   const dot = repo.getDot(dotId);
   if (!dot) throw new Error("No such dot");
   const conv = conversationId ?? repo.latestConversationId(dotId);
-  repo.addMessage({ dotId, role: "user", text, attachments, conversationId: conv });
+  repo.addMessage({ dotId, role: "user", text, attachments, conversationId: conv, from: from ?? null });
   if (dot.status === "paused") {
     repo.addMessage({ dotId, role: "system", text: `${dot.name} is paused. Resume it to pick this up.`, conversationId: conv });
   }
+  // A card agy is holding expires, the hook answers deny, and this message runs when that turn finishes.
+  expireDotWaits(dotId, "message");
   state(dotId).inbox.push({ text, trigger: { kind: "chat" }, attachments, conversationId: conv });
   void pump(dotId);
 }
@@ -57,6 +59,7 @@ export function queueTask(dotId: string, text: string, conversationId: string) {
   if (!dot) throw new Error("No such dot");
   repo.addMessage({ dotId, role: "activity", text: `Voice task · ${text}`, conversationId, channelId: null });
   if (dot.status === "paused") repo.addMessage({ dotId, role: "system", text: `${dot.name} is paused. Resume it to pick this up.`, conversationId });
+  expireDotWaits(dotId, "message");
   state(dotId).inbox.push({ text: `${text}\n\n(Asked on a voice call.)`, trigger: { kind: "chat" }, conversationId });
   void pump(dotId);
 }
@@ -74,6 +77,7 @@ export function sendToChannel(channelId: string, text: string) {
       repo.addMessage({ dotId: d.id, role: "system", text: `${d.name} is paused.`, channelId });
       continue;
     }
+    expireDotWaits(d.id, "message");
     state(d.id).inbox.push({
       text: `[#${ch.name}] ${text}`,
       trigger: { kind: "channel", channelId, name: ch.name },
@@ -108,14 +112,18 @@ export function runTrigger(t: AppTrigger, event: Record<string, unknown>) {
 export function stop(dotId: string) {
   const s = state(dotId);
   s.inbox = [];
+  expireDotWaits(dotId, "stopped");
   s.abort?.abort();
+  endAgyForDot(dotId);
 }
 
 export function pause(dotId: string) {
   const dot = repo.getDot(dotId);
   if (!dot || dot.status === "paused") return;
   repo.updateDot(dotId, { status: "paused" });
+  expireDotWaits(dotId, "stopped");
   state(dotId).abort?.abort();
+  endAgyForDot(dotId);
   repo.addMessage({ dotId, role: "system", text: `Paused. Any ongoing work was stopped, and ${dot.name} won't message you until you resume it.` });
   void computer.sleep(dotId).catch(() => {}); // its computer sleeps too (cloud boxes keep their state)
 }
@@ -139,9 +147,30 @@ export async function resolveCard(messageId: string, choice: "approve" | "deny" 
 
   const approved = choice === "approve" || choice === "always";
   const status: CardData["status"] = choice === "answer" ? "answered" : approved ? "approved" : "denied";
-  repo.updateMessage(messageId, { card: { ...card, status, answer } });
-  if (choice === "always" && card.ruleAction) repo.addRule({ dotId: dot.id, action: card.ruleAction, decision: "allow" });
+  const applyChoice = () => {
+    repo.updateMessage(messageId, { card: { ...card, status, answer } });
+    if (choice === "always" && card.ruleAction) repo.addRule({ dotId: dot.id, action: card.ruleAction, decision: "allow" });
+  };
+  // agy's MCP call or PreToolUse hook is blocked on this card. Waking it is the whole resume.
+  if (hasWaiter(messageId)) {
+    applyChoice();
+    settleWaiter(messageId, choice, answer);
+    return;
+  }
 
+  // A card left over from the Responses API loop. Leave it pending so switching models can still answer it.
+  if (isAgyModel(await modelFor(dot.model))) {
+    const convId = msg.conversationId ?? repo.latestConversationId(dot.id);
+    repo.addMessage({
+      dotId: dot.id,
+      role: "system",
+      text: "Antigravity doesn't continue approvals from another model. Switch back to answer this card.",
+      conversationId: convId,
+    });
+    return;
+  }
+
+  applyChoice();
   const convId = msg.conversationId ?? repo.latestConversationId(dot.id);
   const pending = parsePending(repo.threadOf(convId).pending);
   if (!pending || pending.cardId !== messageId) return;
@@ -160,13 +189,7 @@ export async function resolveCard(messageId: string, choice: "approve" | "deny" 
       }
       pending.outputs.push(await execComputer(dot, call, call.pending_safety_checks));
     } else {
-      const def = findTool(call.name);
-      let output: string;
-      if (def?.pause === "question") output = `The user answered: ${answer ?? ""}`;
-      else if (def?.pause === "approval") output = approved ? "The user approved. Go ahead." : "The user denied this. Do not do it; tell them briefly what you'll do instead, if anything.";
-      else if (def?.pause === "connect") output = approved ? "Connected. Continue with the task." : "The user chose not to connect this app right now. Continue without it or tell them what you need.";
-      else if (approved && def?.execute) output = await execTool(dot, call, signal);
-      else output = "The user denied this action. Don't retry it; continue without it or ask what they'd prefer.";
+      const output = await outputAfterCard(dot, call.name, safeParse(call.arguments), { choice, answer, approved }, signal);
       pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output });
     }
     pending.index++;
@@ -176,6 +199,14 @@ export async function resolveCard(messageId: string, choice: "approve" | "deny" 
 }
 
 // ---------------------------------------------------------------- run loop
+
+/** Drop a voice transcript line that is the user message of this turn, so it isn't read twice. */
+function withoutCurrentVoiceLine(transcript: string, text: string): string {
+  const line = `User: ${text}`;
+  if (transcript === line) return "";
+  const suffix = `\n${line}`;
+  return transcript.endsWith(suffix) ? transcript.slice(0, -suffix.length) : transcript;
+}
 
 async function pump(dotId: string) {
   const s = state(dotId);
@@ -193,8 +224,10 @@ async function pump(dotId: string) {
   const conversationId = batch[0].conversationId;
   let text = batch.map((b) => b.text).join("\n\n");
   // Catch the text agent up on anything said on a voice call in this chat.
+  // A phrase that is itself this turn (Antigravity voice) is already `text`; don't paste it twice.
   const voice = conversationId ? repo.takeVoiceTranscript(conversationId, dot.name) : "";
-  if (voice) text = `[Voice call in this chat since your last turn — you (on the call) and the user said:]\n${voice}\n\n[Now:]\n${text}`;
+  const prior = voice ? withoutCurrentVoiceLine(voice, text) : "";
+  if (prior) text = `[Voice call in this chat since your last turn — you (on the call) and the user said:]\n${prior}\n\n[Now:]\n${text}`;
   await withRun(dotId, (signal) => turn(dotId, text, trigger, signal, attachments, conversationId));
 }
 
@@ -244,7 +277,21 @@ async function turn(dotId: string, text: string, trigger: Trigger, signal: Abort
   repo.routeToConversation(dotId, conversationId);
   repo.routeToChannel(dotId, trigger.kind === "channel" ? trigger.channelId : null);
   const dot = repo.getDot(dotId)!;
+  const model = await modelFor(dot.model);
+  // Antigravity keeps its own process and tools. The Responses API, Open Dot tools, and computer-use stay out.
+  if (isAgyModel(model)) {
+    if (trigger.kind === "trigger") {
+      repo.resetThread(conversationId);
+      endAgySession(conversationId);
+    }
+    await runAgyTurn({ dot, model, text, attachments, signal });
+    return;
+  }
+  // The model left Antigravity: drop the headless process so this turn only goes through drive().
+  endAgySession(conversationId);
   let { thread } = repo.getThread(dotId);
+  // A chat that used to run on agy stores `agy:<conversation>`. That id is not an OpenAI response.
+  if (thread && isAgyModel(thread)) thread = null;
   const pending = parsePending(repo.getThread(dotId).pending);
   const input: ResponseInputItem[] = [];
   // Trigger runs start clean for each event, so a busy inbox doesn't pile up context. An approval
@@ -266,6 +313,8 @@ async function turn(dotId: string, text: string, trigger: Trigger, signal: Abort
 }
 
 async function drive(dot: Dot, prevId: string | null, input: ResponseInputItem[], trigger: Trigger, signal: AbortSignal) {
+  // Tools, computer-use, and approval cards live in this loop. Antigravity never enters it.
+  if (isAgyModel(await modelFor(dot.model))) return;
   for (let step = 0; step < MAX_STEPS; step++) {
     signal.throwIfAborted();
     let resp: Response;
@@ -412,63 +461,19 @@ async function processCalls(dot: Dot, pending: Pending, signal: AbortSignal): Pr
       continue;
     }
 
-    const def = findTool(call.name);
     const args = safeParse(call.arguments);
-    if (!def) {
-      pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: `Unknown tool ${call.name}` });
+    const prep = await prepareToolCall(dot, call.name, args, signal);
+    if (prep.type === "output") {
+      pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: prep.output });
       continue;
     }
-    if (def.pause === "question") {
-      return pauseFor(dot, pending, { kind: "question", status: "pending", title: String(args.question ?? ""), options: (args.options as string[]) ?? [] });
-    }
-    if (def.pause === "approval") {
-      return pauseFor(dot, pending, { kind: "approval", status: "pending", title: String(args.action ?? ""), detail: String(args.details ?? ""), tool: def.name });
-    }
-
-    if (def.pause === "connect") {
-      const toolkit = String(args.toolkit ?? "").trim().toLowerCase();
-      const started = await composio.startConnect(toolkit).catch((err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }));
-      if ("error" in started) {
-        pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: `Couldn't start connecting ${toolkit}: ${started.error}` });
-        continue;
-      }
-      if (started.already) {
-        pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: "Already connected." });
-        continue;
-      }
-      pauseFor(dot, pending, {
-        kind: "connect", status: "pending", title: `Connect ${started.name}`, toolkit, url: started.url,
-        detail: `${dot.name} needs access to your ${started.name} to continue. You'll sign in with ${started.name} directly; ${dot.name} never sees your password.`,
-      });
-      const cardId = pending.cardId!;
-      // Resume on its own as soon as the connection goes live (the OAuth callback route also resolves it).
-      void started.wait().then(() => resolveCard(cardId, "approve")).catch(() => {});
-      return true;
-    }
-
-    const ctx: ToolCtx = { dot, signal, depth: 0 };
-    const blocked = await def.precheck?.(args, ctx).catch(() => null);
-    if (blocked) {
-      pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: blocked });
+    if (prep.type === "run") {
+      pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: await performTool(dot, call.name, args, signal) });
       continue;
     }
-    if (def.describe) {
-      const action = def.describe(args, ctx);
-      repo.setActivity(dot.id, "Checking your rules");
-      const verdict = await review(dot.id, action, (await def.defaultDecision?.(ctx, args)) ?? "allow");
-      if (verdict.decision === "never") {
-        activity(dot.id, "Blocked by your rule", verdict.rule?.action);
-        pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: `Not allowed: the user's rule says never ${verdict.rule?.action ?? "do this"}. Don't try to work around it.` });
-        continue;
-      }
-      if (verdict.decision === "ask") {
-        return pauseFor(dot, pending, {
-          kind: "approval", status: "pending", title: capitalize(action), tool: def.name, ruleAction: verdict.rule?.action ?? action,
-          detail: [def.detail?.(args), verdict.rule ? `Your rule: ask first when it wants to ${verdict.rule.action}.` : null].filter(Boolean).join("\n\n") || undefined,
-        });
-      }
-    }
-    pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: await execTool(dot, call, signal) });
+    pauseFor(dot, pending, prep.card);
+    prep.arm?.(pending.cardId!);
+    return true;
   }
   savePending(dot.id, pending);
   return false;
@@ -479,19 +484,6 @@ function pauseFor(dot: Dot, pending: Pending, card: CardData): true {
   pending.cardId = msg.id;
   savePending(dot.id, pending);
   return true;
-}
-
-async function execTool(dot: Dot, call: ResponseFunctionToolCall, signal: AbortSignal): Promise<string> {
-  const def = findTool(call.name)!;
-  const args = safeParse(call.arguments);
-  repo.setActivity(dot.id, def.label);
-  activity(dot.id, def.label, summarize(args));
-  try {
-    return await def.execute!(args, { dot, signal, depth: 0 });
-  } catch (err) {
-    if (signal.aborted) throw err;
-    return `Error: ${err instanceof Error ? err.message : String(err)}`;
-  }
 }
 
 async function execComputer(
@@ -540,7 +532,13 @@ setConsult(async (target, message, from, _depth, signal) => {
   if (!channelId) repo.addMessage({ dotId: target.id, role: "user", text: message, from: `dot:${from.name}` });
   repo.setActivity(target.id, `Helping ${from.name}`);
   try {
-    const { client, model, stateless } = clientFor(await modelFor(target.model));
+    const appModel = await modelFor(target.model);
+    if (isAgyModel(appModel)) {
+      const note = `${target.name} runs on Antigravity, which can't be consulted from another dot yet.`;
+      repo.addMessage({ dotId: target.id, role: "dot", text: note, from: `dot:${from.name}`, channelId });
+      return note;
+    }
+    const { client, model, stateless } = clientFor(appModel);
     const res = await client.responses.create(
       {
         model,
@@ -584,12 +582,6 @@ function activity(dotId: string, label: string, detail?: string) {
   repo.addMessage({ dotId, role: "activity", text });
 }
 
-function summarize(a: Record<string, unknown>): string | undefined {
-  const v = a.command ?? a.url ?? a.path ?? a.site ?? a.fact ?? a.name ?? a.dot_name;
-  if (typeof v !== "string") return undefined;
-  return v.length > 80 ? v.slice(0, 77) + "…" : v;
-}
-
 function savePending(dotId: string, pending: Pending) {
   repo.setThread(dotId, pending.responseId, JSON.stringify(pending));
 }
@@ -606,4 +598,4 @@ function safeParse(raw: string): Record<string, unknown> {
   }
 }
 
-const capitalize = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+setCardResolver(resolveCard);

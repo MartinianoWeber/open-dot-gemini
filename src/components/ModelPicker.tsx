@@ -5,9 +5,24 @@ import { Check, ChevronDown, Cpu } from "lucide-react";
 import { useStore } from "@/lib/store";
 
 const OPEN = "openrouter:";
-const label = (id: string) => (id.startsWith(OPEN) ? id.slice(OPEN.length) : id);
+const AGY = "agy:";
+const label = (id: string) => {
+  if (id === "agy:default") return "CLI default";
+  if (id.startsWith(AGY)) return id.slice(AGY.length);
+  if (id.startsWith(OPEN)) return id.slice(OPEN.length);
+  return id;
+};
+
+function groupLabel(id: string, index: number, list: string[]): string | undefined {
+  const prev = list[index - 1];
+  if (id.startsWith(AGY) && !prev?.startsWith(AGY)) return "Antigravity";
+  if (id.startsWith(OPEN) && !prev?.startsWith(OPEN)) return "Open models";
+  if (index === 0 && list.some((m) => m.startsWith(OPEN) || m.startsWith(AGY))) return "OpenAI";
+  return undefined;
+}
 
 function hint(id: string): string | null {
+  if (id.startsWith(AGY)) return "Antigravity";
   if (id.startsWith(OPEN)) return "Open model · OpenRouter";
   if (/-pro\b/.test(id)) return "Strongest · slower";
   if (/-nano\b/.test(id)) return "Fastest · cheapest";
@@ -42,8 +57,7 @@ export default function ModelPicker({
       id,
       label: label(id),
       sub: hint(id),
-      // a heading above the first open model (and above OpenAI's when both are there)
-      group: id.startsWith(OPEN) && !list[i - 1]?.startsWith(OPEN) ? "Open models" : i === 0 && list.some((m) => m.startsWith(OPEN)) ? "OpenAI" : undefined,
+      group: groupLabel(id, i, list),
     })),
   ];
 

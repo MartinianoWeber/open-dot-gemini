@@ -158,6 +158,7 @@ export type ComputerInfo = {
   triggersKey: "env" | "settings" | null; // Composio API key for triggers
   sky: boolean; // OpenAI's Sky computer-use runtime is installed on this Mac
   composio: boolean; // COMPOSIO_API_KEY is set
+  agy: boolean; // Antigravity CLI (`agy`) is on PATH
 };
 
 export type ServerEvent =

@@ -6,6 +6,7 @@ import { knownModels, hasKey, keySource } from "./agent/client";
 import { COMPUTER_ENABLED } from "./agent/tools";
 import { skyInstalled } from "./computer/sky";
 import { cloudKeySource } from "./computer/cloud";
+import { agyInstalled } from "./agent/agy";
 import { openRouterSource } from "./agent/openrouter";
 import { triggersKeySource } from "./triggers";
 import { apps, signedIn } from "./composio";
@@ -27,6 +28,7 @@ export function computerInfo(): ComputerInfo {
     triggersKey: triggersKeySource(),
     sky: skyInstalled(),
     composio: signedIn(),
+    agy: agyInstalled(),
   };
 }
 

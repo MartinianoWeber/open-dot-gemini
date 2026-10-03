@@ -39,11 +39,12 @@ export async function deleteDot(dotId: string) {
   repo.deleteDot(dotId);
 }
 
-export async function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string) {
+export async function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string, from?: string | null) {
   if (!text.trim() && !attachments.length) return;
-  runtime.sendMessage(dotId, text.trim(), attachments, conversationId);
+  runtime.sendMessage(dotId, text.trim(), attachments, conversationId, from);
   const conv = conversationId ? repo.getConversation(conversationId) : null;
-  if (conv?.title === "New chat") void autoTitle(conv.id, text || attachments.map((a) => a.name).join(", "));
+  const seed = text || attachments.map((a) => a.name).join(", ");
+  if (conv?.title === "New chat" || (from === "voice" && conv?.title === "Voice chat")) void autoTitle(conv.id, seed);
 }
 
 // ---------- conversations ----------

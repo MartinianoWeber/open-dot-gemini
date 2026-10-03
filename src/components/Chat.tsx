@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, use, useMemo, useState, useTransition } from "react";
+import { Suspense, use, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AppWindow, ArrowRight, ArrowUp, AudioLines, Plus, Brain, Download, ExternalLink, FileText, Paperclip, Plug, Check, Clock, Globe, KeyRound, Laptop, MessageSquare, MonitorSmartphone, Search, ShieldAlert, Sparkles, Terminal, X } from "lucide-react";
+import { AppWindow, ArrowRight, ArrowUp, AudioLines, Mic, Plus, Brain, Download, ExternalLink, FileText, Paperclip, Plug, Check, Clock, Globe, KeyRound, Laptop, MessageSquare, MonitorSmartphone, Search, ShieldAlert, Sparkles, Terminal, X } from "lucide-react";
 import { confirmConnectCard, resolveCard, resumeDot, sendMessage, startConversation, startVoiceConversation } from "@/app/actions";
 import { mergeMessages, useStore } from "@/lib/store";
+import { startDictation } from "@/lib/dictation";
 import { startCall } from "@/lib/voiceCall";
 import Dot3DLazy from "./Dot3DLazy";
 import DotOrb from "./DotOrb";
@@ -45,7 +46,10 @@ export default function Chat({ dot, conversation }: { dot: Dot; conversation?: s
   const mine = useMemo(() => conversations.filter((c) => c.dotId === dot.id).sort((a, b) => b.updatedAt - a.updatedAt), [conversations, dot.id]);
   const convId = conversation === "new" ? null : conversation ?? mine[0]?.id ?? null;
   const messages = useMemo(() => (convId ? all.filter((m) => m.conversationId === convId && !m.channelId) : []), [all, convId]);
-  const hasKey = useStore((s) => s.computer.hasKey || s.computer.openRouter !== null);
+  const hasKey = useStore((s) => s.computer.hasKey || s.computer.openRouter !== null || s.computer.agy);
+  const defaultModel = useStore((s) => s.computer.model);
+  // Gemini (Antigravity) has no phone call. The same button dictates into the composer.
+  const dictate = (dot.model || defaultModel || "").startsWith("agy:");
   const [, start] = useTransition();
   // A chat counts as started once you've written, or talked in voice mode.
   const fresh = !messages.some((m) => m.role === "user" || m.from === "voice");
@@ -116,12 +120,12 @@ export default function Chat({ dot, conversation }: { dot: Dot; conversation?: s
                 Add an OpenAI or OpenRouter key in{" "}
                 <Link href="/settings#api-key" className="underline underline-offset-2">
                   Settings
-                </Link>{" "}
-                so your dots can think.
+                </Link>
+                , or install the Antigravity CLI (<span className="font-mono">agy</span>), so your dots can think.
               </span>
             </div>
           )}
-          <Composer key={convId ?? "new"} dot={dot} onSend={send} onVoice={voice} />
+          <Composer key={`${convId ?? "new"}:${dictate ? "dictate" : "call"}`} dot={dot} dictate={dictate} onSend={send} onVoice={voice} />
         </div>
       </div>
     </div>
@@ -173,13 +177,58 @@ async function uploadFiles(dotId: string, list: File[]): Promise<{ files?: Attac
   return r.json();
 }
 
-function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, attachments: Attachment[]) => void; onVoice: () => void }) {
+function Composer({ dot, dictate, onSend, onVoice }: { dot: Dot; dictate: boolean; onSend: (text: string, attachments: Attachment[]) => void; onVoice: () => void }) {
   const [text, setText] = useState("");
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [dictating, setDictating] = useState(false);
+  const [dictError, setDictError] = useState<string | null>(null);
   const [pending, start] = useTransition();
+  const baseRef = useRef("");
+  const dictRef = useRef<{ stop: () => void } | null>(null);
   const ready = uploads.filter((u) => u.state === "done" && u.file).map((u) => u.file!);
   const busy = uploads.some((u) => u.state === "uploading");
+
+  const stopDictation = () => {
+    dictRef.current?.stop();
+    dictRef.current = null;
+    setDictating(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      dictRef.current?.stop();
+      dictRef.current = null;
+    };
+  }, []);
+
+  const toggleDictation = () => {
+    if (dictRef.current) {
+      stopDictation();
+      return;
+    }
+    baseRef.current = text;
+    const session = startDictation(
+      (spoken) => {
+        const base = baseRef.current;
+        const spokenText = spoken.trim();
+        const joiner = base && spokenText && !/\s$/.test(base) ? " " : "";
+        setText(`${base}${joiner}${spokenText}`);
+      },
+      (message) => {
+        setDictError(message);
+        dictRef.current = null;
+        setDictating(false);
+      },
+    );
+    if ("error" in session) {
+      setDictError(session.error);
+      return;
+    }
+    setDictError(null);
+    dictRef.current = session;
+    setDictating(true);
+  };
 
   const addFiles = (list: File[]) => {
     if (!list.length) return;
@@ -197,6 +246,7 @@ function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, a
   };
 
   const submit = () => {
+    stopDictation();
     const value = text.trim();
     if ((!value && !ready.length) || busy) return;
     setText("");
@@ -232,8 +282,9 @@ function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, a
         addFiles([...e.dataTransfer.files]);
       }}
     >
+      {dictError && <p className="mb-2 px-2 text-body-sm text-destructive">{dictError}</p>}
       <div
-        className={`rounded-[26px] border bg-card p-1.5 shadow-[0_8px_32px_-12px_rgba(0,0,0,0.15)] transition-[box-shadow,border-color] focus-within:shadow-[0_12px_40px_-12px_rgba(0,0,0,0.2)] ${dragging ? "border-brand border-dashed" : "border-black/10"}`}
+        className={`rounded-[26px] border bg-card p-1.5 shadow-[0_8px_32px_-12px_rgba(0,0,0,0.15)] transition-[box-shadow,border-color] focus-within:shadow-[0_12px_40px_-12px_rgba(0,0,0,0.2)] ${dragging ? "border-brand border-dashed" : dictating ? "border-destructive/40" : "border-black/10"}`}
       >
         {uploads.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5 pl-1">
@@ -270,7 +321,10 @@ function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, a
             rows={1}
             autoFocus
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              if (dictRef.current) stopDictation();
+            }}
             onPaste={(e) => {
               const pasted = [...e.clipboardData.files];
               if (pasted.length) {
@@ -284,9 +338,20 @@ function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, a
                 submit();
               }
             }}
-            placeholder={dragging ? "Drop files to attach" : `Message ${dot.name}…`}
+            placeholder={dragging ? "Drop files to attach" : dictating ? "Listening…" : `Message ${dot.name}…`}
             className="max-h-52 min-h-10 flex-1 resize-none bg-transparent py-2 text-[16px] leading-[1.45] tracking-default outline-none [field-sizing:content] placeholder:text-foreground/35"
           />
+          {dictate && (
+            <button
+              type="button"
+              className={`flex size-9 shrink-0 items-center justify-center rounded-full text-card transition-opacity hover:opacity-85 ${dictating ? "bg-destructive" : "bg-foreground"}`}
+              onClick={toggleDictation}
+              aria-label={dictating ? "Stop dictation" : "Dictate"}
+              title={dictating ? "Stop dictation" : "Dictate"}
+            >
+              <Mic className="size-4" strokeWidth={2} />
+            </button>
+          )}
           {text.trim() || ready.length || busy ? (
             <button
               className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground text-card transition-opacity hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-25"
@@ -297,15 +362,17 @@ function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, a
               <ArrowUp className="size-4" strokeWidth={2.25} />
             </button>
           ) : (
-            // Empty composer: the round button starts voice mode. What's said lands in this chat.
-            <button
-              className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground text-card transition-opacity hover:opacity-85"
-              onClick={onVoice}
-              aria-label={`Voice mode with ${dot.name}`}
-              title="Voice mode"
-            >
-              <AudioLines className="size-4" strokeWidth={2} />
-            </button>
+            !dictate && (
+              // Empty composer: the round button starts voice mode. What's said lands in this chat.
+              <button
+                className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground text-card transition-opacity hover:opacity-85"
+                onClick={onVoice}
+                aria-label={`Voice mode with ${dot.name}`}
+                title="Voice mode"
+              >
+                <AudioLines className="size-4" strokeWidth={2} />
+              </button>
+            )
           )}
         </div>
       </div>
@@ -350,7 +417,7 @@ const ACTIVITY_ICON: [RegExp, typeof Globe][] = [
   [/^Searched|^Searching/, Search],
   [/^Browsing|^Reading the web/, Globe],
   [/^Using its computer/, MonitorSmartphone],
-  [/^Running commands|^Reading a file|^Writing a file/, Terminal],
+  [/^Running |^Reading a file|^Writing a file/, Terminal],
   [/^Signing in/, KeyRound],
   [/^On your computer/, Laptop],
   [/^Remember|^Updating memory/, Brain],

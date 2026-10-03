@@ -121,7 +121,7 @@ export default function SettingsView() {
           </div>
         </Section>
 
-        <Section eyebrow="Engine" title="Models & computers" description="Models come from what your OpenAI key can use, plus open models once you add an OpenRouter key.">
+        <Section eyebrow="Engine" title="Models & computers" description="Models come from your OpenAI key, from OpenRouter once you add a key, and from Antigravity when agy is on your PATH.">
           <ApiKey />
           <OpenModelsKey />
           <CloudKey />
@@ -134,9 +134,16 @@ export default function SettingsView() {
           </div>
           <dl className="surface divide-y divide-black/[0.06]">
             {[
-              ["Models on your key", computer.models.length ? `${computer.models.length} available` : "Loading…", true],
+              ["Models available", computer.models.length ? `${computer.models.length} available` : "Loading…", true],
               ["Computer use", computer.computerTool === "off" ? "Off (page tools only)" : "OpenAI computer tool", true],
               ["Dot computers", computer.docker ? `Docker containers · ${computer.image}` : "Sandbox folders (start Docker for containers)", computer.docker],
+              [
+                "Antigravity",
+                computer.agy
+                  ? "agy is on your PATH. Sign in once by running agy in a terminal. Open Dot does not store your Google password or token."
+                  : "agy is not on your PATH, so Antigravity models stay hidden.",
+                computer.agy,
+              ],
             ].map(([k, v, ok]) => (
               <div key={String(k)} className="flex items-center gap-4 px-4 py-2.5">
                 <dt className="eyebrow w-36 shrink-0">{k}</dt>

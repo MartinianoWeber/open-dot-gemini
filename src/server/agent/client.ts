@@ -2,6 +2,7 @@ import "server-only";
 import OpenAI from "openai";
 import { getSetting, setSetting } from "../db";
 import { seal, unseal } from "../vault";
+import { AGY_DEFAULT_ID, agyInstalled, agyModelIds, isAgyModel } from "./agy";
 import { isOpenRouterModel, openModels, openRouterId, openRouterKey, openrouter, preferredOpenModel, smallOpenModel } from "./openrouter";
 
 // Models are chosen from what the API key can actually use. Precedence for a dot's model:
@@ -94,19 +95,25 @@ async function resolveOpenAI(): Promise<{ main: string; review: string; availabl
   };
 }
 
-/** OpenAI models (with an OpenAI key) first, then open models (with an OpenRouter key). */
+/** OpenAI models (with an OpenAI key), then open models (with an OpenRouter key), then Antigravity if `agy` is installed. */
 async function resolve() {
-  const [oa, open] = await Promise.all([
+  const [oa, open, agy] = await Promise.all([
     resolveOpenAI(),
     openModels().catch((err) => {
       console.warn("[dots] couldn't list OpenRouter models:", err instanceof Error ? err.message : err);
       return [] as string[];
     }),
+    agyInstalled()
+      ? agyModelIds().catch((err) => {
+          console.warn("[dots] couldn't list agy models:", err instanceof Error ? err.message : err);
+          return [AGY_DEFAULT_ID];
+        })
+      : Promise.resolve([] as string[]),
   ]);
   const resolved = {
-    main: oa?.main ?? (open.length ? preferredOpenModel(open) : process.env.DOTS_MODEL || MAIN_PREFERENCE[0]),
+    main: oa?.main ?? (open.length ? preferredOpenModel(open) : (agy[0] ?? (process.env.DOTS_MODEL || MAIN_PREFERENCE[0]))),
     review: oa?.review ?? (open.length ? smallOpenModel(open) : process.env.DOTS_REVIEW_MODEL || REVIEW_PREFERENCE[0]),
-    available: [...(oa?.available ?? []), ...open],
+    available: [...(oa?.available ?? []), ...open, ...agy],
   };
   g.__dotsResolved = resolved;
   console.log(`[dots] default ${resolved.main} (agent), ${resolved.review} (rule review); ${resolved.available.length} models available`);
@@ -121,12 +128,13 @@ export function resetModels() {
 
 /** The API client for a model, the model id that API expects, and whether it keeps conversation state. */
 export function clientFor(model: string): { client: OpenAI; model: string; stateless: boolean } {
+  if (isAgyModel(model)) throw new Error("Antigravity models run through the agy CLI, not the Responses API.");
   return isOpenRouterModel(model) ? { client: openrouter(), model: openRouterId(model), stateless: true } : { client: openai(), model, stateless: false };
 }
 
-/** True when any model provider is set up (OpenAI or OpenRouter). */
+/** True when any model provider is set up (OpenAI, OpenRouter, or the agy CLI). */
 export function canThink(): boolean {
-  return hasKey() || Boolean(openRouterKey());
+  return hasKey() || Boolean(openRouterKey()) || agyInstalled();
 }
 
 export function models(): Promise<{ main: string; review: string; available: string[] }> {
