@@ -13,7 +13,7 @@ import * as triggers from "@/server/triggers";
 import * as composio from "@/server/composio";
 import * as voice from "@/server/voice";
 import { autoTitle } from "@/server/titles";
-import type { Attachment, Dot, Look, RuleDecision, TriggerApp, TriggerType } from "@/lib/types";
+import type { Attachment, Dot, DotRank, Look, RuleDecision, TriggerApp, TriggerType } from "@/lib/types";
 
 // All mutations go through here; the UI updates from the event stream, not from return values.
 
@@ -91,6 +91,11 @@ export async function setLocalAccess(dotId: string, allowed: boolean) {
         ? `${dot.name} can now run tasks on this computer (it will still ask first).`
         : `${dot.name} will no longer be able to access this computer. You can allow access again from its settings on this computer.`,
     });
+}
+
+export async function setDotRank(dotId: string, rank: DotRank) {
+  if (rank !== 0 && rank !== 1 && rank !== 2) return;
+  repo.updateDot(dotId, { rank });
 }
 
 export async function setCreator(dotId: string, allowed: boolean) {

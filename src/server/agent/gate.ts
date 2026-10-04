@@ -1,10 +1,14 @@
 import "server-only";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { emit } from "../bus";
 import * as composio from "../composio";
+import { DATA_DIR } from "../db";
 import * as repo from "../repo";
 import { workspaceDir } from "../computer/shell";
 import type { CardData, Dot, RuleDecision } from "@/lib/types";
-import { classifyAgyTool } from "./agy-guard";
+import { agyWriteGrant, classifyAgyTool, MAX_STOP_CONTINUES, plannerSpoke, stopDecision, transcriptPathOk, type StopDecision } from "./agy-guard";
 import { AGY_MCP_ALLOW } from "./bridge";
 import { review } from "./review";
 import { findTool, type ToolCtx } from "./tools";
@@ -255,9 +259,11 @@ const MCP_HOOK_TOOLS = new Set(["mcp_tool", "call_mcp_tool"]);
 
 /** Headless agy auto-denies MCP unless this grant is present. Scoped to the dot's own server. */
 function allowHook(name: string): HookDecision {
-  if (MCP_HOOK_TOOLS.has(name) || name.startsWith("COMPOSIO_")) {
-    return { decision: "allow", permissionOverrides: [AGY_MCP_ALLOW] };
-  }
+  const overrides: string[] = [];
+  const write = agyWriteGrant(name);
+  if (write) overrides.push(write);
+  if (MCP_HOOK_TOOLS.has(name) || name.startsWith("COMPOSIO_")) overrides.push(AGY_MCP_ALLOW);
+  if (overrides.length) return { decision: "allow", permissionOverrides: overrides };
   return { decision: "allow" };
 }
 
@@ -283,6 +289,82 @@ export async function decideAgyHook(dot: Dot, name: string, args: Record<string,
   } finally {
     timed.cancel();
   }
+}
+
+function stopCountFile(dotId: string): string {
+  return path.join(DATA_DIR, "dots", dotId, "agy-stop-count");
+}
+
+/** A new user message gets a fresh budget. Automatic nudges inside the same task do not reset it. */
+export function resetAgyStopCount(dotId: string) {
+  try {
+    fs.rmSync(stopCountFile(dotId), { force: true });
+  } catch {
+    /* nothing stored yet */
+  }
+}
+
+function bumpAgyStopCount(dotId: string): number {
+  const file = stopCountFile(dotId);
+  let n = 0;
+  try {
+    n = Number(fs.readFileSync(file, "utf8")) || 0;
+  } catch {
+    /* first continue */
+  }
+  n += 1;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, String(n));
+  return n;
+}
+
+function readTranscriptTail(file: string): string | null {
+  try {
+    const stat = fs.statSync(file);
+    const len = Math.min(stat.size, 512_000);
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.readSync(fd, buf, 0, len, Math.max(0, stat.size - len));
+    } finally {
+      fs.closeSync(fd);
+    }
+    return buf.toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function spokeFromStop(body: Record<string, unknown>): boolean | null {
+  const raw = body.transcriptPath;
+  if (typeof raw !== "string") return null;
+  const file = transcriptPathOk(raw, os.homedir());
+  if (!file) return null;
+  const tail = readTranscriptTail(file);
+  if (tail == null) return null;
+  return plannerSpoke(tail);
+}
+
+/**
+ * agy's Stop hook. When the model ends a turn without saying anything, send it back in
+ * until it replies or the budget for this task runs out. A pending card is the user, so the turn ends.
+ */
+export function decideAgyStop(dotId: string, body: unknown): StopDecision {
+  if (repo.pendingCards(dotId).length) return { decision: "allow" };
+  const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const executionNum = typeof rec.executionNum === "number" ? rec.executionNum : undefined;
+  const terminationReason = typeof rec.terminationReason === "string" ? rec.terminationReason : undefined;
+  const fullyIdle = typeof rec.fullyIdle === "boolean" ? rec.fullyIdle : undefined;
+  const spoke = spokeFromStop(rec);
+  const decision = stopDecision({ terminationReason, executionNum, fullyIdle, spoke });
+  if (decision.decision !== "continue") {
+    if (spoke === true) resetAgyStopCount(dotId);
+    return decision;
+  }
+  // Leave the count high so later nudges in this same task don't earn a fresh budget.
+  // The next user message resets it.
+  if (bumpAgyStopCount(dotId) > MAX_STOP_CONTINUES) return { decision: "allow" };
+  return decision;
 }
 
 /** Abort `parent` or after `ms`, whichever comes first. `cancel` drops the timer once the card is answered. */

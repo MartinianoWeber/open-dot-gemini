@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Play } from "lucide-react";
 import * as actions from "@/app/actions";
 import { useStore } from "@/lib/store";
+import { dotRank, RANK_OPTIONS } from "@/lib/rank";
 import LookEditor from "./LookEditor";
 import { DotTriggers } from "./Triggers";
 import Dot3DLazy from "./Dot3DLazy";
@@ -65,6 +66,26 @@ export default function SetupPane({ dot }: { dot: Dot }) {
                   placeholder="Tone, preferences, things to always or never do…"
                 />
               </label>
+              <div>
+                <span className="eyebrow mb-1.5 block">Importance</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {RANK_OPTIONS.map((opt) => {
+                    const on = dotRank(dot) === opt.rank;
+                    return (
+                      <button
+                        key={opt.rank}
+                        type="button"
+                        disabled={pending || on}
+                        onClick={() => start(() => actions.setDotRank(dot.id, opt.rank))}
+                        className={`rounded-md border px-3 py-1.5 text-left transition-colors ${on ? "border-foreground bg-foreground text-card" : "border-black/10 text-foreground/70 hover:border-black/20 hover:text-foreground"}`}
+                      >
+                        <span className="block text-[13px]">{opt.label}</span>
+                        <span className={`block text-[11px] ${on ? "text-card/70" : "text-foreground/40"}`}>{opt.hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="pt-2">
                 <LookEditor look={look} onChange={setLook} />
               </div>

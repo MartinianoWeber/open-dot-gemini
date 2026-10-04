@@ -47,7 +47,7 @@ export function bridgeOrigin(): string {
 }
 
 function hookSource(url: string, token: string): string {
-  return `// Open Dot asks before agy runs a command, opens a URL, or writes outside this workspace.
+  return `// Open Dot asks before agy runs a command or opens a URL. Writes on this computer are allowed.
 const url = ${JSON.stringify(url)};
 const token = ${JSON.stringify(token)};
 try {
@@ -219,15 +219,18 @@ export function ensureAgyBridge(dotId: string): boolean {
         "",
       ].join("\n"),
     ) || changed;
+  const command = hookCommand(dotId, script);
   const hooks = {
     "open-dot-gate": {
       PreToolUse: [
         {
           // MCP tool names are allowed here so agy doesn't prompt in the terminal. The MCP handler still applies rules and cards.
           matcher: "run_command|read_url_content|search_web|write_to_file|replace_file_content|multi_replace_file_content|call_mcp_tool|mcp_tool|open_url|read_page|click|type_text|sign_in|remember|forget|create_routine|delete_routine|send_update|share_file|message_dot|create_dot|open_room|ask_user|app_connect|COMPOSIO_.*",
-          hooks: [{ type: "command", command: hookCommand(dotId, script), timeout: HOOK_TIMEOUT_SEC }],
+          hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_SEC }],
         },
       ],
+      // Stop is a flat handler list. It puts the same turn back in the loop when the model quits early.
+      Stop: [{ type: "command", command, timeout: 60 }],
     },
   };
   changed = writeText(path.join(dir, "hooks.json"), `${JSON.stringify(hooks, null, 2)}\n`) || changed;

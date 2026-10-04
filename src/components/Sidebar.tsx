@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { LayoutGrid, Plus, Search, Settings, SquarePen, Trash2, X } from "lucide-react";
+import { LayoutGrid, Search, Settings, SquarePen, Trash2, X } from "lucide-react";
 import { deleteConversation } from "@/app/actions";
 import { markRead, useStore } from "@/lib/store";
 import { setSidebarOpen, useSidebarOpen } from "@/lib/ui";
-import { statusDot, timeAgo } from "@/lib/status";
+import { timeAgo } from "@/lib/status";
 import DotOrb from "./DotOrb";
+import DotRail from "./DotRail";
 import type { Conversation, Message } from "@/lib/types";
 
 export function Wordmark() {
@@ -85,7 +86,7 @@ export default function Sidebar() {
       <aside
         // Picking anything in the drawer closes it.
         onClickCapture={(e) => (e.target as HTMLElement).closest("a") && setSidebarOpen(false)}
-        className={`fixed inset-y-0 left-0 z-50 flex w-[300px] max-w-[85vw] shrink-0 flex-col bg-background shadow-2xl transition-transform duration-200 md:static md:z-auto md:translate-x-0 md:shadow-none ${drawerOpen ? "translate-x-0" : "-translate-x-full"}`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-[300px] min-w-0 max-w-[85vw] shrink-0 flex-col bg-background shadow-2xl transition-transform duration-200 md:static md:z-auto md:max-w-[300px] md:translate-x-0 md:shadow-none ${drawerOpen ? "translate-x-0" : "-translate-x-full"}`}
       >
       {/* Header */}
       <div className="flex h-14 shrink-0 items-center gap-1 px-4">
@@ -127,32 +128,11 @@ export default function Sidebar() {
         </div>
       )}
 
-      {/* Your dots: a horizontal row of characters */}
+      {/* Your dots: a scrollable row. Primary ones are larger and come first. */}
       {!q && (
-        <div className="shrink-0 pb-1">
-          <div className="flex gap-0.5 overflow-x-auto px-2.5 pb-1 [scrollbar-width:none]">
-            {dots.map((d) => (
-              <Link
-                key={d.id}
-                href={`/dots/${d.id}`}
-                onClick={() => markRead(d.id)}
-                className={`flex w-[54px] shrink-0 flex-col items-center gap-1 rounded-lg py-1.5 transition-colors ${activeDot === d.id ? "bg-black/[0.05]" : "hover:bg-black/[0.03]"}`}
-                title={`${d.name}${d.purpose ? ` · ${d.purpose}` : ""}`}
-              >
-                <span className="relative">
-                  <DotOrb look={d.look} status={d.status} size={40} />
-                  {d.status !== "idle" && <span className={`absolute right-0 bottom-0.5 size-2.5 rounded-full ring-2 ring-card ${statusDot(d)}`} />}
-                </span>
-                <span className="w-full truncate text-center text-[11px] text-foreground/70">{d.name}</span>
-              </Link>
-            ))}
-            <Link href="/new" className="flex w-[54px] shrink-0 flex-col items-center gap-1 rounded-lg py-1.5 text-foreground/45 hover:bg-black/[0.03] hover:text-foreground" title="New dot">
-              <span className="flex size-10 items-center justify-center rounded-full border border-dashed border-black/20">
-                <Plus className="size-4" strokeWidth={1.75} />
-              </span>
-              <span className="text-[11px]">New</span>
-            </Link>
-          </div>
+        <div className="min-w-0 shrink-0 px-1.5 pb-1">
+          <DotRail dots={dots} activeId={activeDot} showNew fade="background" />
+          {dots.length > 5 && <p className="px-2 pt-0.5 text-[10px] leading-tight text-foreground/35">Scroll sideways · right-click a dot to resize</p>}
         </div>
       )}
 

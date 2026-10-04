@@ -8,8 +8,10 @@ import { startConversation } from "@/app/actions";
 import { markRead, useStore } from "@/lib/store";
 import { DEFAULT_LOOK } from "@/lib/look";
 import { statusDot, statusLabel, timeAgo } from "@/lib/status";
+import { byImportance, dotRank } from "@/lib/rank";
 import Dot3DLazy from "./Dot3DLazy";
 import DotOrb from "./DotOrb";
+import DotRail from "./DotRail";
 
 export default function Home() {
   const router = useRouter();
@@ -45,7 +47,8 @@ export default function Home() {
     );
   }
 
-  const target = dots.find((d) => d.id === picked) ?? dots[0];
+  const ordered = [...dots].sort(byImportance);
+  const target = ordered.find((d) => d.id === picked) ?? ordered[0];
 
   const submit = () => {
     const value = text.trim();
@@ -86,22 +89,10 @@ export default function Home() {
                 placeholder={target ? `Ask ${target.name} to research, browse, plan, or build something…` : "Loading…"}
                 className="max-h-60 min-h-[72px] w-full resize-none bg-transparent py-1.5 text-[17px] leading-[1.45] tracking-default outline-none [field-sizing:content] placeholder:text-foreground/35"
               />
-              <div className="flex items-center gap-2 pt-1">
-                <div className="flex flex-1 flex-wrap gap-1.5">
-                  {dots.map((d) => (
-                    <button
-                      key={d.id}
-                      type="button"
-                      onClick={() => setPicked(d.id)}
-                      className={`flex h-7 items-center gap-1.5 rounded-md border pr-2.5 pl-1 text-[13px] transition-colors ${d.id === target?.id ? "border-foreground bg-foreground text-card" : "border-black/10 text-foreground/60 hover:border-black/20 hover:text-foreground"}`}
-                    >
-                      <DotOrb look={d.look} status={d.status} size={18} />
-                      {d.name}
-                    </button>
-                  ))}
-                </div>
+              <div className="flex items-end gap-2 pt-1">
+                <DotRail className="flex-1" dots={ordered} activeId={target?.id} onSelect={setPicked} fade="card" />
                 <button
-                  className="flex size-10 shrink-0 items-center justify-center rounded-full bg-foreground text-card transition-opacity hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-25"
+                  className="mb-5 flex size-10 shrink-0 items-center justify-center self-end rounded-full bg-foreground text-card transition-opacity hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-25"
                   disabled={pending || !text.trim()}
                   onClick={submit}
                   aria-label="Send"
@@ -123,14 +114,14 @@ export default function Home() {
             </Link>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            {dots.map((d) => (
+            {ordered.map((d) => (
               <Link
                 key={d.id}
                 href={`/dots/${d.id}`}
                 onClick={() => markRead(d.id)}
                 className="surface group flex items-start gap-3.5 p-4 transition-[border-color,box-shadow] hover:border-black/15 hover:shadow-elevated"
               >
-                <DotOrb look={d.look} status={d.status} size={40} />
+                <DotOrb look={d.look} status={d.status} size={dotRank(d) === 2 ? 52 : dotRank(d) === 0 ? 32 : 40} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between">
                     <span className="text-[15px] font-medium">{d.name}</span>

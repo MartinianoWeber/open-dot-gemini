@@ -4,7 +4,7 @@ import { emit } from "./bus";
 import { Cron } from "croner";
 import { normalizeLook } from "@/lib/look";
 import type {
-  AppTrigger, Attachment, CardData, Channel, Conversation, Dot, DotStatus, Look, Memory, Message, MessageRole, PasswordEntry, Routine, Rule, RuleDecision, Skill,
+  AppTrigger, Attachment, CardData, Channel, Conversation, Dot, DotRank, DotStatus, Look, Memory, Message, MessageRole, PasswordEntry, Routine, Rule, RuleDecision, Skill,
 } from "@/lib/types";
 
 type Row = Record<string, unknown>;
@@ -23,6 +23,7 @@ const toDot = (r: Row): Dot => ({
   localAccess: r.local_access === 1,
   creator: r.creator === 1,
   model: (r.model as string) ?? null,
+  rank: Number(r.rank) === 0 || Number(r.rank) === 2 ? (Number(r.rank) as DotRank) : 1,
   createdAt: r.created_at as number,
 });
 
@@ -31,7 +32,7 @@ const g = globalThis as unknown as { __dotsActivity?: Map<string, string | null>
 const activity = (g.__dotsActivity ??= new Map());
 
 export function listDots(): Dot[] {
-  return db().prepare("SELECT * FROM dots ORDER BY created_at").all().map(toDot);
+  return db().prepare("SELECT * FROM dots ORDER BY rank DESC, created_at").all().map(toDot);
 }
 
 export function getDot(dotId: string): Dot | null {
@@ -55,7 +56,7 @@ export function createDot(input: { name: string; purpose: string; instructions?:
 
 export function updateDot(
   dotId: string,
-  patch: Partial<Pick<Dot, "name" | "purpose" | "instructions" | "look" | "status" | "localAccess" | "creator" | "model">>,
+  patch: Partial<Pick<Dot, "name" | "purpose" | "instructions" | "look" | "status" | "localAccess" | "creator" | "model" | "rank">>,
 ): Dot | null {
   const cols: string[] = [];
   const vals: (string | number | null)[] = [];
@@ -90,6 +91,10 @@ export function updateDot(
   if (patch.creator !== undefined) {
     cols.push("creator = ?");
     vals.push(patch.creator ? 1 : 0);
+  }
+  if (patch.rank !== undefined) {
+    cols.push("rank = ?");
+    vals.push(patch.rank);
   }
   if (cols.length) db().prepare(`UPDATE dots SET ${cols.join(", ")} WHERE id = ?`).run(...vals, dotId);
   const dot = getDot(dotId);

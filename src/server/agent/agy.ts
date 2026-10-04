@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { emit } from "../bus";
 import { ensureAgyBridge } from "./bridge";
+import { resetAgyStopCount } from "./gate";
 import { workspaceDir } from "../computer/shell";
 import * as repo from "../repo";
 import type { Attachment, Dot } from "@/lib/types";
@@ -206,7 +207,7 @@ type AgyEvent = {
 };
 
 type TurnEnd =
-  | { kind: "result"; result: NonNullable<AgyEvent["result"]>; hadText: boolean }
+  | { kind: "result"; result: NonNullable<AgyEvent["result"]>; hadText: boolean; usedTool: boolean }
   | { kind: "permission" }
   | { kind: "aborted" }
   | { kind: "exit"; code: number | null }
@@ -216,6 +217,7 @@ type Turn = {
   done: boolean;
   draft: { id: string; text: string } | null;
   hadText: boolean;
+  usedTool: boolean;
   sawPermission: boolean;
   stall: ReturnType<typeof setTimeout> | null;
   /** step_index → activity message, so a later DONE event can fill in the command or path. */
@@ -284,7 +286,8 @@ function armPermissionStall(session: Session) {
   }, PERMISSION_STALL_MS);
 }
 
-const PERMISSION_RE = /requires approval|permission request|waiting for approval|ask_permission|soft-denied|denied by permission/i;
+// soft-denied is not a stall: headless mode skips the tool and keeps the turn going.
+const PERMISSION_RE = /requires approval|permission request|waiting for approval|ask_permission/i;
 
 function toolLabel(name: string | undefined, params: Record<string, unknown> | undefined): { label: string; detail?: string } {
   const n = (name ?? "").toLowerCase();
@@ -336,6 +339,7 @@ function onLine(session: Session, line: string) {
     if (!step) return;
     if (step.step_type === "agent_response" && step.text_delta) pushDelta(session, turn, step.text_delta);
     if (step.step_type === "tool") {
+      turn.usedTool = true;
       const name = step.tool_name || step.tool_info?.name;
       const { label, detail } = toolLabel(name, step.tool_info?.parameters);
       const text = detail ? `${label} · ${detail}` : label;
@@ -364,7 +368,7 @@ function onLine(session: Session, line: string) {
       killSession(session);
       return;
     }
-    settle(session, { kind: "result", result: ev.result, hadText: turn?.hadText ?? false });
+    settle(session, { kind: "result", result: ev.result, hadText: turn?.hadText ?? false, usedTool: turn?.usedTool ?? false });
   }
 }
 
@@ -424,7 +428,18 @@ function openSession(dot: Dot, model: string): Session {
   if (existing && !existing.dead && existing.modelArg === modelArg && !bridgeChanged) return existing;
   if (existing) killSession(existing);
   const resume = resumeId(dot.id);
-  const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--add-dir", ws, "--sandbox"];
+  // Print mode soft-denies a tool even after this hook allows it, and the turn then ends with no reply.
+  // Skip agy's own prompt. --sandbox would keep writes inside the workspace even after an allow.
+  // The PreToolUse hook still allows, asks, or denies, and a write allow carries write_file(*).
+  const args = [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--add-dir",
+    ws,
+    "--dangerously-skip-permissions",
+  ];
   if (modelArg) args.push("--model", modelArg);
   if (resume) args.push("--conversation", resume);
   const child = spawnAgy(bin, args, ws);
@@ -439,18 +454,34 @@ function withPersona(dot: Dot, text: string): string {
   if (dot.purpose.trim()) head.push(`Your job: ${dot.purpose.trim()}`);
   if (dot.instructions.trim()) head.push(`How the user wants you to work:\n${dot.instructions.trim()}`);
   head.push(
+    "Work until the task is finished. Don't stop after one command or one file. Reply with the result when it is done. If you are blocked on something only the user can do, ask once and stop.",
+  );
+  head.push(
     dot.creator
-      ? "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, create_dot, open_room, and ask_user. When the work needs companions, invent only the ones it needs with create_dot, then open_room so they discuss. Don't create extra dots. Reading, writing, and commands inside this workspace stay with your own tools."
-      : "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, and ask_user. Reading, writing, and commands inside this workspace stay with your own tools.",
+      ? "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, create_dot, open_room, and ask_user. When the work needs companions, invent only the ones it needs with create_dot, then open_room so they discuss. Don't create extra dots. Reading, writing, and commands stay with your own tools. write_to_file may use any absolute path on this computer; the file is created on the machine running Open Dot."
+      : "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, and ask_user. Reading, writing, and commands stay with your own tools. write_to_file may use any absolute path on this computer; the file is created on the machine running Open Dot.",
   );
   return `${head.join("\n\n")}\n\n${text}`;
 }
 
 function sendTurn(session: Session, content: string, signal: AbortSignal): Promise<TurnEnd> {
   return new Promise((resolve) => {
-    const turn: Turn = { done: false, draft: null, hadText: false, sawPermission: false, stall: null, tools: new Map(), resolve };
+    let onAbort: () => void = () => {};
+    const turn: Turn = {
+      done: false,
+      draft: null,
+      hadText: false,
+      usedTool: false,
+      sawPermission: false,
+      stall: null,
+      tools: new Map(),
+      resolve: (end) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(end);
+      },
+    };
     session.turn = turn;
-    const onAbort = () => {
+    onAbort = () => {
       settle(session, { kind: "aborted" });
       killSession(session);
     };
@@ -464,6 +495,23 @@ function sendTurn(session: Session, content: string, signal: AbortSignal): Promi
       if (err && !turn.done) settle(session, { kind: "error", message: err.message });
     });
   });
+}
+
+/** Empty successes after a tool are the model quitting mid-task. Nudge it on the same process. */
+const MAX_EMPTY_PASSES = 6;
+const CONTINUE_CUE =
+  "Continue. The task is not finished. Do the next step yourself and keep going until it is done. Reply with the result when it is finished. If a command was denied, don't retry that command; use another approach, or ask the user once if you are blocked.";
+
+function reportClosedTurn(dotId: string, end: Exclude<TurnEnd, { kind: "result" | "aborted" }>) {
+  if (end.kind === "permission") {
+    repo.addMessage({ dotId, role: "system", text: PERMISSION_NOTE });
+    return;
+  }
+  if (end.kind === "error") {
+    repo.addMessage({ dotId, role: "system", text: `Antigravity stopped: ${end.message}` });
+    return;
+  }
+  repo.addMessage({ dotId, role: "system", text: "Antigravity closed before it finished this reply." });
 }
 
 /** One user turn on the conversation's agy process. The caller has already routed the dot to that conversation. */
@@ -492,40 +540,54 @@ export async function runAgyTurn(opts: { dot: Dot; model: string; text: string; 
     return;
   }
 
-  const content = session.personaPending ? withPersona(dot, text) : text;
+  resetAgyStopCount(dot.id);
+  let content = session.personaPending ? withPersona(dot, text) : text;
   session.personaPending = false;
-  repo.setActivity(dot.id, "Thinking");
-  const end = await sendTurn(session, content, signal);
-  if (end.kind === "aborted" || signal.aborted) return;
 
-  if (end.kind === "permission") {
-    repo.addMessage({ dotId: dot.id, role: "system", text: PERMISSION_NOTE });
-    return;
-  }
-  if (end.kind === "error") {
-    repo.addMessage({ dotId: dot.id, role: "system", text: `Antigravity stopped: ${end.message}` });
-    return;
-  }
-  if (end.kind === "exit") {
-    repo.addMessage({ dotId: dot.id, role: "system", text: "Antigravity closed before it finished this reply." });
-    return;
-  }
+  for (let pass = 0; pass < MAX_EMPTY_PASSES; pass++) {
+    if (signal.aborted) return;
+    repo.setActivity(dot.id, pass === 0 ? "Thinking" : "Continuing");
+    const end = await sendTurn(session, content, signal);
+    if (end.kind === "aborted" || signal.aborted) return;
+    if (end.kind !== "result") {
+      reportClosedTurn(dot.id, end);
+      return;
+    }
 
-  const status = end.result.status ?? "";
-  const err = end.result.error ?? "";
-  const response = end.result.response ?? "";
-  if (!end.hadText && response.trim()) repo.addMessage({ dotId: dot.id, role: "dot", text: response });
-  if (status === "SUCCESS" || status === "") {
-    if (!end.hadText && !response.trim()) repo.addMessage({ dotId: dot.id, role: "dot", text: "(no reply)" });
-    return;
+    const status = end.result.status ?? "";
+    const err = end.result.error ?? "";
+    const response = (end.result.response ?? "").trim();
+    if (status !== "SUCCESS" && status !== "") {
+      // The process may still be up after an error, but its stream session is done. The next turn starts clean.
+      killSession(session);
+      if (/auth|sign in|not authenticated/i.test(err)) {
+        repo.addMessage({ dotId: dot.id, role: "system", text: AUTH_NOTE });
+        return;
+      }
+      repo.addMessage({ dotId: dot.id, role: "system", text: `Antigravity stopped: ${err || status}` });
+      return;
+    }
+
+    if (!end.hadText && response) repo.addMessage({ dotId: dot.id, role: "dot", text: response });
+    const silent = !end.hadText && !response;
+    if (!silent) return;
+    const lastPass = pass === MAX_EMPTY_PASSES - 1;
+    if (!end.usedTool || lastPass || session.dead) {
+      if (end.usedTool && !session.dead) {
+        repo.addMessage({
+          dotId: dot.id,
+          role: "system",
+          text: `Stopped after ${pass + 1} tries without a reply. Say "continue" to keep going.`,
+        });
+      } else if (session.dead) {
+        repo.addMessage({ dotId: dot.id, role: "system", text: "Antigravity closed before it finished this reply." });
+      } else {
+        repo.addMessage({ dotId: dot.id, role: "dot", text: "(no reply)" });
+      }
+      return;
+    }
+    content = CONTINUE_CUE;
   }
-  // The process may still be up after an error, but its stream session is done. The next turn starts clean.
-  killSession(session);
-  if (/auth|sign in|not authenticated/i.test(err)) {
-    repo.addMessage({ dotId: dot.id, role: "system", text: AUTH_NOTE });
-    return;
-  }
-  repo.addMessage({ dotId: dot.id, role: "system", text: `Antigravity stopped: ${err || status}` });
 }
 
 const SPEAK_TIMEOUT_MS = 75_000;

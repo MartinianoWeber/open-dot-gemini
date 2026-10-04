@@ -34,6 +34,9 @@ export type Look = {
 
 export type DotStatus = "idle" | "working" | "waiting" | "paused";
 
+/** How large a dot appears in the picker. 2 is primary, 1 standard, 0 quiet. */
+export type DotRank = 0 | 1 | 2;
+
 export type Dot = {
   id: string;
   name: string;
@@ -45,6 +48,7 @@ export type Dot = {
   localAccess: boolean; // may this dot run things on the user's own computer?
   creator: boolean; // may this dot create other dots?
   model: string | null; // null = use the default model
+  rank: DotRank;
   createdAt: number;
 };
 
