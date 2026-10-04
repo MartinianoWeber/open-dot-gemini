@@ -10,6 +10,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS dots (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '',
   look TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'idle', local_access INTEGER NOT NULL DEFAULT 0,
+  creator INTEGER NOT NULL DEFAULT 0,
   thread TEXT, pending TEXT, created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -51,9 +52,10 @@ export function db(): DatabaseSync {
     const conn = new DatabaseSync(path.join(DATA_DIR, "dots.db"));
     conn.exec("PRAGMA journal_mode = WAL;");
     conn.exec(SCHEMA);
-    migrate(conn);
     g.__dotsDb = conn;
   }
+  // Idempotent, so a process that already opened the file still picks up new columns.
+  migrate(g.__dotsDb);
   return g.__dotsDb;
 }
 
@@ -62,6 +64,7 @@ function migrate(conn: DatabaseSync) {
   const cols = conn.prepare("PRAGMA table_info(dots)").all().map((c) => (c as { name: string }).name);
   if (!cols.includes("model")) conn.exec("ALTER TABLE dots ADD COLUMN model TEXT");
   if (!cols.includes("box_id")) conn.exec("ALTER TABLE dots ADD COLUMN box_id TEXT");
+  if (!cols.includes("creator")) conn.exec("ALTER TABLE dots ADD COLUMN creator INTEGER NOT NULL DEFAULT 0");
   const convCols = conn.prepare("PRAGMA table_info(conversations)").all().map((c) => (c as { name: string }).name);
   // Model-facing history for providers that don't keep conversation state (OpenRouter).
   if (convCols.length && !convCols.includes("history")) conn.exec("ALTER TABLE conversations ADD COLUMN history TEXT");

@@ -17,9 +17,9 @@ import type { Attachment, Dot, Look, RuleDecision, TriggerApp, TriggerType } fro
 
 // All mutations go through here; the UI updates from the event stream, not from return values.
 
-export async function createDot(input: { name: string; purpose: string; look: Look }): Promise<string> {
+export async function createDot(input: { name: string; purpose: string; look: Look; creator?: boolean }): Promise<string> {
   const name = input.name.trim() || "Dot";
-  const dot = repo.createDot({ name, purpose: input.purpose.trim(), look: input.look });
+  const dot = repo.createDot({ name, purpose: input.purpose.trim(), look: input.look, creator: input.creator === true });
   repo.addMessage({
     dotId: dot.id,
     role: "dot",
@@ -90,6 +90,18 @@ export async function setLocalAccess(dotId: string, allowed: boolean) {
       text: allowed
         ? `${dot.name} can now run tasks on this computer (it will still ask first).`
         : `${dot.name} will no longer be able to access this computer. You can allow access again from its settings on this computer.`,
+    });
+}
+
+export async function setCreator(dotId: string, allowed: boolean) {
+  const dot = repo.updateDot(dotId, { creator: allowed });
+  if (dot)
+    repo.addMessage({
+      dotId,
+      role: "system",
+      text: allowed
+        ? `${dot.name} can now create other dots. It asks first, and the dots it creates can't create more.`
+        : `${dot.name} can no longer create other dots.`,
     });
 }
 

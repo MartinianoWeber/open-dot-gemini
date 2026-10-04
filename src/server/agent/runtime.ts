@@ -2,11 +2,11 @@ import "server-only";
 import type {
   ResponseComputerToolCall, ResponseFunctionToolCall, ResponseInputContent, ResponseInputItem, Response, Tool,
 } from "openai/resources/responses/responses";
-import { endAgyForDot, endAgySession, isAgyModel, runAgyTurn } from "./agy";
+import { agySpeak, endAgyForDot, endAgySession, isAgyModel, runAgyTurn } from "./agy";
 import { clientFor, isReasoningModel, modelFor, supportsComputerTool } from "./client";
 import { systemPrompt, type Trigger } from "./prompt";
 import { expireDotWaits, hasWaiter, outputAfterCard, performTool, prepareToolCall, setCardResolver, settleWaiter } from "./gate";
-import { COMPUTER_ENABLED, setConsult, toolsForDot } from "./tools";
+import { COMPUTER_ENABLED, resetDotCreations, setConsult, setOpenRoom, toolsForDot } from "./tools";
 import * as repo from "../repo";
 import * as computer from "../computer";
 import type { ComputerAction } from "../computer/browser";
@@ -274,6 +274,7 @@ function notifyFinished(dot: Dot, since: number) {
 }
 
 async function turn(dotId: string, text: string, trigger: Trigger, signal: AbortSignal, attachments: Attachment[], conversationId: string) {
+  resetDotCreations(dotId);
   repo.routeToConversation(dotId, conversationId);
   repo.routeToChannel(dotId, trigger.kind === "channel" ? trigger.channelId : null);
   const dot = repo.getDot(dotId)!;
@@ -527,6 +528,109 @@ function rebuildContext(dotId: string, exclude: string): ResponseInputItem[] {
 
 // ---------------------------------------------------------------- dot-to-dot
 
+const MAX_ROOM_TURNS = 6;
+
+/** The model that speaks for this dot. Antigravity stays on Gemini; a room does not fall through to OpenAI. */
+async function roomModel(dot: Dot): Promise<string> {
+  return modelFor(dot.model);
+}
+
+function roomInstructions(dot: Dot, others: Dot[], topic: string): string {
+  const job = dot.purpose.trim();
+  const voice = dot.instructions.trim();
+  const mentions = others.map((d) => `@${d.name}`).join(" or ");
+  return [
+    `You are ${dot.name}${job ? `, ${job}` : ""}.`,
+    voice ? `How you speak:\n${voice}` : "",
+    `Topic (reply in this language): ${topic}`,
+    others.length ? `Teammates: ${others.map((d) => d.name).join(", ")}.` : "",
+    "1 to 3 sentences. Give your opinion; you may disagree.",
+    mentions
+      ? `End with exactly one teammate mention, written as ${mentions}. Mention nobody only when the point is closed.`
+      : "Mention nobody.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** The earliest @Name that is a teammate other than the speaker. No mention ends the room. */
+function mentionedNext(text: string, roster: Dot[], speakerId: string): Dot | null {
+  const others = roster.filter((d) => d.id !== speakerId).sort((a, b) => b.name.length - a.name.length);
+  let hit: { at: number; dot: Dot } | null = null;
+  for (const d of others) {
+    const re = new RegExp(`@${d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "iu");
+    const found = re.exec(text);
+    if (found && (!hit || found.index < hit.at)) hit = { at: found.index, dot: d };
+  }
+  return hit?.dot ?? null;
+}
+
+async function roomLine(dot: Dot, others: Dot[], topic: string, soFar: { name: string; text: string }[], signal: AbortSignal, revise?: string): Promise<string> {
+  const appModel = await roomModel(dot);
+  const prior = soFar.map((l) => `${l.name}: ${l.text}`).join("\n");
+  const cue = [prior ? `${prior}\n\nYour turn.` : `Open the discussion. Topic: ${topic}`, revise].filter(Boolean).join("\n\n");
+  const instructions = roomInstructions(dot, others, topic);
+  if (isAgyModel(appModel)) {
+    const text = await agySpeak({ model: appModel, prompt: instructions, cue, signal });
+    return text.trim() || "(no reply)";
+  }
+  const { client, model, stateless } = clientFor(appModel);
+  const res = await client.responses.create(
+    {
+      model,
+      instructions,
+      input: [{ role: "user", content: cue }],
+      ...(stateless ? { store: false } : isReasoningModel(model) ? { reasoning: { effort: "low" as const } } : {}),
+    },
+    { signal },
+  );
+  return res.output_text?.trim() || "(no reply)";
+}
+
+setOpenRoom(async (creator, name, members, topic, signal) => {
+  const ch = repo.createChannel(name, creator.id, members.map((d) => d.id));
+  repo.addMessage({
+    dotId: creator.id,
+    role: "system",
+    text: `#${ch.name} created. ${creator.name} coordinates; mention @Name to ask someone directly.`,
+    channelId: ch.id,
+  });
+  const roster = [creator, ...members.filter((d) => d.id !== creator.id)];
+  const lines: { name: string; text: string }[] = [];
+  let speaker: Dot = creator;
+  let closed = false;
+  try {
+    for (let turn = 0; turn < MAX_ROOM_TURNS; turn++) {
+      if (signal.aborted) throw signal.reason ?? new Error("The run was stopped.");
+      const others = roster.filter((d) => d.id !== speaker.id);
+      let text = await roomLine(speaker, others, topic, lines, signal);
+      if (signal.aborted) throw signal.reason ?? new Error("The run was stopped.");
+      // The opener has to pass the ball. A line with no @Name ends the room, so ask once before that.
+      if (!lines.length && others.length && !mentionedNext(text, roster, speaker.id)) {
+        const names = others.map((d) => `@${d.name}`).join(" or ");
+        const revised = await roomLine(speaker, others, topic, lines, signal, `Your line did not mention a teammate. Say the same opinion again and end with exactly one of: ${names}.`);
+        if (mentionedNext(revised, roster, speaker.id)) text = revised;
+      }
+      repo.addMessage({ dotId: speaker.id, role: "dot", text, channelId: ch.id });
+      lines.push({ name: speaker.name, text });
+      const next = mentionedNext(text, roster, speaker.id);
+      if (!next) {
+        closed = true;
+        break;
+      }
+      speaker = next;
+    }
+  } catch (err) {
+    if (signal.aborted) throw err;
+    const why = err instanceof Error ? err.message : String(err);
+    const brief = lines.map((l) => `${l.name}: ${l.text.replace(/\s+/g, " ").slice(0, 160)}`).join("\n");
+    return [`#${ch.name} is open, but the discussion stopped: ${why}`, brief].filter(Boolean).join("\n");
+  }
+  const brief = lines.map((l) => `${l.name}: ${l.text.replace(/\s+/g, " ").slice(0, 160)}`).join("\n");
+  const why = closed ? "It ended when nobody was mentioned." : "It stopped after 6 turns.";
+  return [`#${ch.name}`, why, brief].filter(Boolean).join("\n");
+});
+
 setConsult(async (target, message, from, _depth, signal) => {
   const channelId = repo.channelRoute(from.id);
   if (!channelId) repo.addMessage({ dotId: target.id, role: "user", text: message, from: `dot:${from.name}` });
@@ -534,9 +638,23 @@ setConsult(async (target, message, from, _depth, signal) => {
   try {
     const appModel = await modelFor(target.model);
     if (isAgyModel(appModel)) {
-      const note = `${target.name} runs on Antigravity, which can't be consulted from another dot yet.`;
-      repo.addMessage({ dotId: target.id, role: "dot", text: note, from: `dot:${from.name}`, channelId });
-      return note;
+      const job = target.purpose.trim();
+      const voice = target.instructions.trim();
+      const reply = await agySpeak({
+        model: appModel,
+        prompt: [
+          `You are ${target.name}${job ? `, ${job}` : ""}.`,
+          voice ? `How you speak:\n${voice}` : "",
+          `Another dot, ${from.name}, is asking you something. Answer in character, in their language, in 1 to 5 sentences.`,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        cue: `${from.name} asks: ${message}`,
+        signal,
+      });
+      const text = reply.trim() || "(no reply)";
+      repo.addMessage({ dotId: target.id, role: "dot", text, from: `dot:${from.name}`, channelId });
+      return `${target.name} replied: ${text}`;
     }
     const { client, model, stateless } = clientFor(appModel);
     const res = await client.responses.create(

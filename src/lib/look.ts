@@ -53,9 +53,10 @@ export function normalizeLook(raw: Partial<Record<keyof Look, unknown>> | null |
 
 export const NAME_IDEAS = ["Pixel", "Mochi", "Juniper", "Atlas", "Nova", "Pebble", "Scout", "Echo", "Clove", "Orbit", "Sprout", "Bix"];
 
-export const STARTERS: { name: string; purpose: string; look: Look }[] = [
+export const STARTERS: { name: string; purpose: string; look: Look; creator?: boolean }[] = [
   { name: "Scout", purpose: "Research anything I ask and deliver clear, sourced briefs", look: { ...DEFAULT_LOOK, color: "#9fcbff", accent: "#2a6fdb", accessory: "antenna" } },
   { name: "Juniper", purpose: "Keep an eye on my inbox and draft replies in my voice", look: { ...DEFAULT_LOOK, color: "#97e0b8", accent: "#1f8f5f", eyeColor: "#1f8f5f", accessory: "sprout", shape: "chubby" } },
   { name: "Atlas", purpose: "Plan trips and track prices for flights and hotels", look: { ...DEFAULT_LOOK, color: "#ffd98a", accent: "#e0492d", eyeColor: "#c2410c", accessory: "cap", eyes: "wide" } },
   { name: "Bix", purpose: "Write and run code and scripts on its computer", look: { ...DEFAULT_LOOK, color: "#b9b3ff", accent: "#5b46d6", eyeColor: "#8a4bd6", accessory: "headphones", material: "glossy" } },
+  { name: "Taller", purpose: "Create other dots for a job, each with its own name, craft, and voice", look: { ...DEFAULT_LOOK, color: "#dcb4f5", accent: "#9b3cc4", eyeColor: "#8a4bd6", accessory: "cap", shape: "tall", eyes: "happy" }, creator: true },
 ];

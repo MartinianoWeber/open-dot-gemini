@@ -17,13 +17,14 @@ export default function NewDot() {
   const [look, setLook] = useState<Look>(DEFAULT_LOOK);
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("");
+  const [creator, setCreator] = useState(false);
   const placeholder = "Pixel";
   const [pending, start] = useTransition();
   const wide = useMediaQuery("(min-width: 640px)");
 
   const create = () =>
     start(async () => {
-      const id = await createDot({ name: name || placeholder, purpose, look });
+      const id = await createDot({ name: name || placeholder, purpose, look, creator });
       markRead(id);
       router.push(`/dots/${id}`);
     });
@@ -71,7 +72,7 @@ export default function NewDot() {
                   key={s.name}
                   type="button"
                   className="group flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-popover"
-                  onClick={() => (setName(s.name), setPurpose(s.purpose), setLook(s.look))}
+                  onClick={() => (setName(s.name), setPurpose(s.purpose), setLook(s.look), setCreator(s.creator === true))}
                 >
                   <DotOrb look={s.look} size={26} />
                   <span className="min-w-0 flex-1">
@@ -82,6 +83,7 @@ export default function NewDot() {
                 </button>
               ))}
             </div>
+            {creator && <p className="mt-2 text-[12px] text-foreground/50">This dot will be able to create other dots. You can change that later in Setup.</p>}
           </div>
 
           <div className="mt-8">

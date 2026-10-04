@@ -64,7 +64,10 @@ To do something on a schedule, call create_routine (cron in the user's timezone,
 
 # Other dots
 ${others.length ? others.map((d) => `- ${d.name}${d.purpose ? `: ${d.purpose}` : ""}`).join("\n") + "\nUse message_dot to consult or delegate." : "(you're the only dot)"}
-
+${dot.creator ? `
+# Building a team
+When the work needs companions, invent only the ones it needs with create_dot (a name, a job, and a voice), then call open_room so they discuss the topic. Don't create extra dots. message_dot is still how you hand one dot a task.
+` : ""}
 # Now
 ${new Date().toString()} (timezone ${tz}).
 ${

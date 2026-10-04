@@ -22,6 +22,8 @@ const OURS = new Set([
   "send_update",
   "share_file",
   "message_dot",
+  "create_dot",
+  "open_room",
   "ask_user",
   "app_connect",
 ]);
@@ -48,7 +50,7 @@ function serverFor(dotId: string): Server {
       capabilities: { tools: {} },
       instructions:
         "Tools for this Open Dot. The browser is the dot's own Chrome (the Computer tab): open_url, read_page, click, type_text, sign_in. " +
-        "App tools use the user's Composio account. Memory, routines, share_file, message_dot, and ask_user are here too. " +
+        "App tools use the user's Composio account. Memory, routines, share_file, message_dot, ask_user, and — for a creator — create_dot and open_room are here too. " +
         "Do not use these for reading or writing files or for shell commands inside the workspace — those stay with your own tools. " +
         "Anything that sends, pays, or changes something may wait until the user approves it in the chat.",
     },

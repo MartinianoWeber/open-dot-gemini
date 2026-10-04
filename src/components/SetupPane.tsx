@@ -80,6 +80,29 @@ export default function SetupPane({ dot }: { dot: Dot }) {
           </div>
         </Section>
 
+        <Section eyebrow="Team" title="Can create dots" description={`Let ${dot.name} invent other dots. The ones it creates can't create more, and it asks the first time.`}>
+          <div className="surface p-5">
+            <div className="flex items-center gap-2">
+              <h2 className="text-[15px] font-medium">Create other dots</h2>
+              <button
+                role="switch"
+                aria-label="Create other dots"
+                aria-checked={dot.creator}
+                disabled={pending}
+                onClick={() => start(() => actions.setCreator(dot.id, !dot.creator))}
+                className={`relative ml-auto h-5 w-9 rounded-full transition-colors ${dot.creator ? "bg-brand" : "bg-black/15"}`}
+              >
+                <span className={`absolute top-0.5 size-4 rounded-full bg-card shadow-sm transition-[left] ${dot.creator ? "left-[18px]" : "left-0.5"}`} />
+              </button>
+            </div>
+            <p className="mt-2 text-body-sm text-foreground/55">
+              {dot.creator
+                ? `${dot.name} can create teammates. Each one gets a random look, the default model, and no access to this computer.`
+                : `${dot.name} can't create dots. Turn this on to let it add teammates when a job needs them.`}
+            </p>
+          </div>
+        </Section>
+
         <Section eyebrow="Approvals" title="Rules" description={`${dot.name} knows when to take action and when to ask for approval. Add custom rules for more control.`}>
           <RuleEditor dotId={dot.id} name={dot.name} />
         </Section>

@@ -1,5 +1,8 @@
 import "server-only";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { emit } from "../bus";
 import { ensureAgyBridge } from "./bridge";
 import { workspaceDir } from "../computer/shell";
@@ -120,18 +123,19 @@ function quoteCmd(arg: string): string {
   return `"${arg.replace(/"/g, '""')}"`;
 }
 
-function spawnAgy(bin: string, args: string[], cwd: string): ChildProcess {
+function spawnAgy(bin: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): ChildProcess {
   if (process.platform === "win32") {
     // Node won't execute a .cmd without cmd.exe. /s strips one outer quote pair, so the inner quotes stay.
     const inner = [quoteCmd(bin), ...args.map(quoteCmd)].join(" ");
     return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${inner}"`], {
       cwd,
+      env,
       windowsHide: true,
       windowsVerbatimArguments: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
   }
-  return spawn(bin, args, { cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+  return spawn(bin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
 }
 
 function killChild(child: ChildProcess) {
@@ -435,7 +439,9 @@ function withPersona(dot: Dot, text: string): string {
   if (dot.purpose.trim()) head.push(`Your job: ${dot.purpose.trim()}`);
   if (dot.instructions.trim()) head.push(`How the user wants you to work:\n${dot.instructions.trim()}`);
   head.push(
-    "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, and ask_user. Reading, writing, and commands inside this workspace stay with your own tools.",
+    dot.creator
+      ? "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, create_dot, open_room, and ask_user. When the work needs companions, invent only the ones it needs with create_dot, then open_room so they discuss. Don't create extra dots. Reading, writing, and commands inside this workspace stay with your own tools."
+      : "Open Dot tools cover the browser (the Computer tab: open_url, read_page, click, type_text, sign_in), the user's apps, memory, routines, share_file, message_dot, and ask_user. Reading, writing, and commands inside this workspace stay with your own tools.",
   );
   return `${head.join("\n\n")}\n\n${text}`;
 }
@@ -520,6 +526,183 @@ export async function runAgyTurn(opts: { dot: Dot; model: string; text: string; 
     return;
   }
   repo.addMessage({ dotId: dot.id, role: "system", text: `Antigravity stopped: ${err || status}` });
+}
+
+const SPEAK_TIMEOUT_MS = 75_000;
+
+type AgyPrint = {
+  status?: string;
+  response?: string;
+  error?: string;
+  denied_actions?: { action?: string; display_name?: string }[];
+};
+
+/** The print-mode JSON object. Warnings may sit on earlier lines. */
+export function parseAgyPrint(stdout: string): AgyPrint | null {
+  const trimmed = stdout.trim();
+  const at = trimmed.lastIndexOf("\n{");
+  const blob = (at >= 0 ? trimmed.slice(at + 1) : trimmed).trim();
+  const from = blob.indexOf("{");
+  if (from < 0) return null;
+  try {
+    return JSON.parse(blob.slice(from)) as AgyPrint;
+  } catch {
+    return null;
+  }
+}
+
+/** Spoken text from a print result. */
+export function lineFromPrint(parsed: AgyPrint | null): string {
+  return parsed?.response?.trim() ?? "";
+}
+
+const SPEAK_RULES = [
+  "You are voicing one character. You are not a software architect unless the character card says so.",
+  "You have no tools. Never call a tool, never run a command, never read a file.",
+  "Do not ask what to build. Do not greet as an assistant.",
+  "Follow the character card. Reply with only the spoken line.",
+].join("\n");
+
+/** A home whose GEMINI.md is only this character, so the user's architect rules are not inherited. */
+function speakHome(rules: string): { home: string; env: NodeJS.ProcessEnv } {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "open-dot-speak-"));
+  const gemini = path.join(home, ".gemini");
+  fs.mkdirSync(gemini);
+  const realCli = path.join(os.homedir(), ".gemini", "antigravity-cli");
+  const link = path.join(gemini, "antigravity-cli");
+  if (fs.existsSync(realCli)) {
+    try {
+      fs.symlinkSync(realCli, link, process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      // The login files stay on the real home. The call can still reach Antigravity.
+    }
+  }
+  fs.writeFileSync(path.join(gemini, "GEMINI.md"), `${SPEAK_RULES}\n\n# Character\n${rules.trim()}\n`, "utf8");
+  const env: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: home, HOME: home };
+  if (process.platform === "win32") {
+    env.HOMEDRIVE = path.win32.parse(home).root.slice(0, 2);
+    env.HOMEPATH = home.slice(2);
+  }
+  return { home, env };
+}
+
+function removeSpeakHome(home: string) {
+  const link = path.join(home, ".gemini", "antigravity-cli");
+  // Unlink the login junction first. A recursive delete must not follow it into the real home.
+  for (const rm of [() => fs.unlinkSync(link), () => fs.rmdirSync(link)]) {
+    try {
+      rm();
+    } catch {
+      // Already gone, or this removal doesn't apply to a junction.
+    }
+  }
+  try {
+    fs.lstatSync(link);
+    return;
+  } catch {
+    // The link is gone.
+  }
+  try {
+    fs.rmSync(home, { recursive: true, force: true });
+  } catch {
+    // The reply is already in hand. A leftover temp dir is harmless.
+  }
+}
+
+function speakOnce(bin: string, model: string, rules: string, cue: string, signal: AbortSignal): Promise<AgyPrint> {
+  const { home, env } = speakHome(rules);
+  const args = ["--output-format", "json", "--sandbox", "--print-timeout", "70s"];
+  const modelArg = agyModelName(model);
+  if (modelArg) args.push("--model", modelArg);
+  args.push("--print", "-");
+
+  return new Promise((resolve, reject) => {
+    const child = spawnAgy(bin, args, home, env);
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const done = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      removeSpeakHome(home);
+      fn();
+    };
+    const onAbort = () => {
+      killChild(child);
+      const reason = signal.reason;
+      done(() => reject(reason instanceof Error ? reason : new Error("The run was stopped.")));
+    };
+    const timer = setTimeout(() => {
+      killChild(child);
+      done(() => reject(new Error("Antigravity took too long to answer.")));
+    }, SPEAK_TIMEOUT_MS);
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", (err) => done(() => reject(err)));
+    child.on("exit", (code) => {
+      done(() => {
+        const parsed = parseAgyPrint(stdout);
+        const response = parsed?.response?.trim() ?? "";
+        if (parsed && (parsed.status === "SUCCESS" || parsed.status === "" || (parsed.status == null && response))) {
+          resolve(parsed);
+          return;
+        }
+        const tail = stderr.trim().split(/\r?\n/).filter(Boolean).at(-1);
+        reject(new Error(parsed?.error?.trim() || tail || `Antigravity exited ${code ?? "unknown"}`));
+      });
+    });
+    child.stdin?.write(cue, "utf8", (err) => {
+      if (err) {
+        killChild(child);
+        done(() => reject(err));
+        return;
+      }
+      child.stdin?.end();
+    });
+  });
+}
+
+/**
+ * One short reply from Antigravity, with no workspace and no Open Dot tools.
+ * The character card is the only GEMINI.md, so a user's architect rules are not inherited.
+ * Headless mode denies shell commands; if that swallows the line, it asks once more.
+ */
+export async function agySpeak(opts: { model: string; prompt: string; cue?: string; signal: AbortSignal }): Promise<string> {
+  const prompt = opts.prompt.trim();
+  const cue = opts.cue?.trim() || "Your turn. Reply with only the spoken line.";
+  if (!prompt) throw new Error("Antigravity was asked to speak with an empty prompt.");
+  const bin = agyBin();
+  if (!bin) throw new Error("agy is not on your PATH.");
+  if (opts.signal.aborted) {
+    const reason = opts.signal.reason;
+    throw reason instanceof Error ? reason : new Error("The run was stopped.");
+  }
+
+  const first = await speakOnce(bin, opts.model, prompt, cue, opts.signal);
+  const spoken = lineFromPrint(first);
+  if (spoken) return spoken;
+  if (!first.denied_actions?.length) throw new Error("Antigravity finished without a spoken line.");
+
+  const second = await speakOnce(
+    bin,
+    opts.model,
+    `${prompt}\n\nTools are unavailable. Reply with only the spoken line.`,
+    cue,
+    opts.signal,
+  );
+  const again = lineFromPrint(second);
+  if (again) return again;
+  const denied = second.denied_actions?.[0]?.display_name || first.denied_actions?.[0]?.display_name || "a tool";
+  throw new Error(`Antigravity stopped on ${denied} and didn't speak.`);
 }
 
 /** Drop the live process for one conversation (a trigger run starts clean, or the model changed). */

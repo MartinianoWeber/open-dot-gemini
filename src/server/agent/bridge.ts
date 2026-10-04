@@ -224,7 +224,7 @@ export function ensureAgyBridge(dotId: string): boolean {
       PreToolUse: [
         {
           // MCP tool names are allowed here so agy doesn't prompt in the terminal. The MCP handler still applies rules and cards.
-          matcher: "run_command|read_url_content|search_web|write_to_file|replace_file_content|multi_replace_file_content|call_mcp_tool|mcp_tool|open_url|read_page|click|type_text|sign_in|remember|forget|create_routine|delete_routine|send_update|share_file|message_dot|ask_user|app_connect|COMPOSIO_.*",
+          matcher: "run_command|read_url_content|search_web|write_to_file|replace_file_content|multi_replace_file_content|call_mcp_tool|mcp_tool|open_url|read_page|click|type_text|sign_in|remember|forget|create_routine|delete_routine|send_update|share_file|message_dot|create_dot|open_room|ask_user|app_connect|COMPOSIO_.*",
           hooks: [{ type: "command", command: hookCommand(dotId, script), timeout: HOOK_TIMEOUT_SEC }],
         },
       ],

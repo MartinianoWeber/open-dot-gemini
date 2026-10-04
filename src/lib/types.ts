@@ -43,6 +43,7 @@ export type Dot = {
   status: DotStatus;
   activity: string | null; // e.g. "Searching the web"
   localAccess: boolean; // may this dot run things on the user's own computer?
+  creator: boolean; // may this dot create other dots?
   model: string | null; // null = use the default model
   createdAt: number;
 };
