@@ -176,6 +176,7 @@ const NAMES: Record<string, string> = {
   gmail: "Gmail", googlecalendar: "Google Calendar", googledrive: "Google Drive", googlesheets: "Google Sheets", googledocs: "Google Docs",
   github: "GitHub", linkedin: "LinkedIn", metaads: "Meta Ads", posthog: "PostHog", serpapi: "SerpApi", youtube: "YouTube",
   google_search_console: "Search Console", outlook: "Outlook", notion: "Notion", slack: "Slack", linear: "Linear", figma: "Figma", reddit: "Reddit", ahrefs: "Ahrefs",
+  clickup: "ClickUp",
 };
 const prettyName = (slug: string) => NAMES[slug] ?? slug.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -204,30 +205,165 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
 // ---------- read vs write, for approvals ----------
 
 const READ_VERB = /_(GET|LIST|SEARCH|FETCH|FIND|READ|RETRIEVE|QUERY|DESCRIBE|LOOKUP|VIEW|CHECK|COUNT|EXPORT|DOWNLOAD)(_|$)/;
-type ExecItem = { tool_slug?: string; arguments?: unknown };
+const LIST_KEYS = ["tools", "tool_calls", "toolCalls"] as const;
+const SLUG_KEYS = ["tool_slug", "toolSlug", "slug", "name", "tool_name", "toolName"] as const;
+const ARG_KEYS = ["arguments", "args", "parameters", "input"] as const;
+
+type ExecItem = { tool_slug: string; arguments: Record<string, unknown> };
+
+function parseMaybeJson(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  const t = v.trim();
+  if (!t || (t[0] !== "{" && t[0] !== "[")) return v;
+  try {
+    return JSON.parse(t) as unknown;
+  } catch {
+    return v;
+  }
+}
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  const p = parseMaybeJson(v);
+  if (p && typeof p === "object" && !Array.isArray(p)) return p as Record<string, unknown>;
+  return null;
+}
+
+function pickString(obj: Record<string, unknown>, keys: readonly string[]): string {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
+
+function pickArgs(obj: Record<string, unknown>): Record<string, unknown> {
+  for (const k of ARG_KEYS) {
+    if (!(k in obj)) continue;
+    return asRecord(obj[k]) ?? {};
+  }
+  return {};
+}
+
+function rawToolList(args: Record<string, unknown>): unknown[] {
+  for (const k of LIST_KEYS) {
+    if (!(k in args)) continue;
+    const parsed = parseMaybeJson(args[k]);
+    if (Array.isArray(parsed) && parsed.length) return parsed;
+  }
+  return [];
+}
+
+/** Models often send `name` / `tool_name` / `tool_calls` instead of Composio's `tools[].tool_slug`. */
+export function normalizeMultiExecuteArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const items = rawToolList(args).flatMap((item): ExecItem[] => {
+    if (typeof item === "string" && item.trim()) return [{ tool_slug: item.trim(), arguments: {} }];
+    const obj = asRecord(item);
+    if (!obj) return [];
+    const tool_slug = pickString(obj, SLUG_KEYS);
+    if (!tool_slug) return [];
+    return [{ tool_slug, arguments: pickArgs(obj) }];
+  });
+  if (!items.length) return args;
+  const rest = { ...args };
+  delete rest.tools;
+  delete rest.tool_calls;
+  delete rest.toolCalls;
+  return { ...rest, tools: items };
+}
 
 export function executeItems(args: Record<string, unknown>): ExecItem[] {
-  return Array.isArray(args.tools) ? (args.tools as ExecItem[]) : [];
+  const tools = normalizeMultiExecuteArgs(args).tools;
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const slug = (item as { tool_slug?: unknown }).tool_slug;
+    if (typeof slug !== "string" || !slug.trim()) return [];
+    return [{ tool_slug: slug.trim(), arguments: asRecord((item as { arguments?: unknown }).arguments) ?? {} }];
+  });
 }
 
 /** Reads run automatically; anything else (send, post, create, update, delete…) asks first. */
 export function executeDecision(args: Record<string, unknown>): RuleDecision {
   const items = executeItems(args);
-  return items.length && items.every((i) => READ_VERB.test(String(i.tool_slug ?? "").toUpperCase())) ? "allow" : "ask";
+  return items.length && items.every((i) => READ_VERB.test(i.tool_slug.toUpperCase())) ? "allow" : "ask";
+}
+
+const HEADLINE_KEYS = ["name", "title", "subject", "summary", "text", "message", "query", "body", "content", "description"];
+const ARTICLE = /^(create|send|delete|update|post|add|remove|edit|share|open)$/;
+
+const clipText = (s: string, n = 160) => {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+};
+
+function appOf(slug: string): string {
+  return prettyName(slug.split("_")[0]?.toLowerCase() ?? "") || "your apps";
+}
+
+/** "CLICKUP_CREATE_TASK" → "Create a task in ClickUp". Later items stay lowercase so a list reads as one sentence. */
+function phraseFor(slug: string, lead = true): string {
+  const words = slug.split("_").slice(1).map((w) => w.toLowerCase()).filter(Boolean);
+  const verb = words[0] ?? "";
+  const object = words.slice(1).join(" ");
+  const app = appOf(slug);
+  const say = (s: string) => (lead ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  if (!verb) return say(`use ${app}`);
+  if (!object) return say(`${verb} in ${app}`);
+  const article = ARTICLE.test(verb) ? (/^[aeiou]/i.test(object) ? "an " : "a ") : "";
+  return say(`${verb} ${article}${object} in ${app}`);
+}
+
+function headlineOf(args: Record<string, unknown>): { key: string; value: string } | null {
+  for (const key of HEADLINE_KEYS) {
+    const v = args[key];
+    if (typeof v === "string" && v.trim()) return { key, value: clipText(v, 80) };
+  }
+  return null;
+}
+
+function fieldText(v: unknown): string {
+  if (typeof v === "string") return clipText(v);
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return v.map(fieldText).filter(Boolean).join(", ").slice(0, 160);
+  return "";
+}
+
+function fieldLabel(key: string): string {
+  return key.replace(/_id$/, "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function detailFor(item: ExecItem): string {
+  const head = headlineOf(item.arguments);
+  const lines: string[] = [];
+  if (head) lines.push(head.value);
+  for (const [key, value] of Object.entries(item.arguments)) {
+    if (head?.key === key) continue;
+    if (/_id$/.test(key) || key === "session_id") continue;
+    const text = fieldText(value);
+    if (text) lines.push(`${fieldLabel(key)}: ${text}`);
+  }
+  if (lines.length) return lines.join("\n");
+  const ids = Object.entries(item.arguments).flatMap(([key, value]) => {
+    const text = fieldText(value);
+    return /_id$/.test(key) && text ? [`${fieldLabel(key)}: ${text}`] : [];
+  });
+  return ids.join("\n");
 }
 
 export function describeExecute(args: Record<string, unknown>): string {
   const items = executeItems(args);
-  const apps = [...new Set(items.map((i) => prettyName(String(i.tool_slug ?? "").split("_")[0].toLowerCase())))];
-  const actions = items.map((i) => String(i.tool_slug ?? "").split("_").slice(1).join(" ").toLowerCase()).filter(Boolean);
-  const thought = typeof args.thought === "string" && args.thought.trim() ? args.thought.trim().replace(/\.$/, "") : null;
-  return thought ? `${thought.replace(/^./, (c) => c.toLowerCase())} (using ${apps.join(", ")})` : `use ${apps.join(", ")} to ${actions.join(", ")}`;
+  if (!items.length) {
+    const thought = typeof args.thought === "string" ? args.thought.trim().replace(/\.$/, "") : "";
+    return thought ? thought.charAt(0).toLowerCase() + thought.slice(1) : "use your connected apps";
+  }
+  const phrases = items.map((item, i) => phraseFor(item.tool_slug, i === 0));
+  if (phrases.length === 1) return phrases[0] ?? "use your connected apps";
+  const last = phrases[phrases.length - 1];
+  return `${phrases.slice(0, -1).join(", ")} and ${last}`;
 }
 
 export function executeDetail(args: Record<string, unknown>): string {
-  return executeItems(args)
-    .map((i) => `${i.tool_slug}\n${JSON.stringify(i.arguments ?? {}, null, 1).slice(0, 700)}`)
-    .join("\n\n");
+  return executeItems(args).map(detailFor).filter(Boolean).join("\n\n");
 }
 
 export function mcpTools(): McpTool[] {

@@ -282,6 +282,7 @@ function composioTools(): ToolDef[] {
         describe: (a) => composio.describeExecute(a),
         defaultDecision: (_ctx, a) => composio.executeDecision(a),
         detail: (a) => composio.executeDetail(a),
+        execute: (a) => composio.callTool(t.name, composio.normalizeMultiExecuteArgs(a)),
       };
     }
     if (t.name === "COMPOSIO_MANAGE_CONNECTIONS") {
