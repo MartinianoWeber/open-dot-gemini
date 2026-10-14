@@ -42,8 +42,16 @@ You'll need Node 22 or newer, pnpm and Google Chrome (Playwright's Chromium work
 cp .env.example .env.local   # add OPENAI_API_KEY, or paste it in Settings later
 pnpm install
 npx playwright install chromium
-pnpm dev                     # http://localhost:3100
+pnpm dev:open                # starts the server and opens http://localhost:3100 in your browser
+pnpm dev                     # http://localhost:3100 (without auto-opening browser)
 pnpm desktop:dev             # optional, opens the desktop window on top of pnpm dev
+```
+
+To launch Open Dot from anywhere in your terminal like an app:
+
+```bash
+pnpm link --global
+opendot
 ```
 
 In development everything is stored in `.data/` in the project folder.

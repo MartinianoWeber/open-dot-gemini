@@ -2,8 +2,13 @@
   "name": "open-dot",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "opendot": "./bin/opendot.mjs"
+  },
   "scripts": {
     "dev": "next dev --port 3100",
+    "dev:open": "node bin/opendot.mjs",
+    "opendot": "node bin/opendot.mjs",
     "build": "next build",
     "start": "next start --port 3100",
     "lint": "eslint",
